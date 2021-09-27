@@ -32,7 +32,7 @@ import java.util.Map;
  *
  * @author Robin Boldt
  */
-public abstract class AbstractTiffElevationProvider extends AbstractElevationProvider {
+public abstract class AbstractTiffElevationProvider extends TileBasedElevationProvider {
     private final Map<String, HeightTile> cacheData = new HashMap<>();
     final double precision = 1e7;
 
@@ -85,6 +85,16 @@ public abstract class AbstractTiffElevationProvider extends AbstractElevationPro
      * Specify the name of the file after downloading
      */
     abstract String getFileNameOfLocalFile(double lat, double lon);
+
+    /**
+     * Return the local file name without file ending, has to be lower case, because DataAccess only supports lower case names.
+     */
+    abstract String getFileName(double lat, double lon);
+
+    /**
+     * Returns the complete URL to download the file
+     */
+    abstract String getDownloadURL(double lat, double lon);
 
     @Override
     public double getEle(double lat, double lon) {

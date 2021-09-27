@@ -20,7 +20,6 @@ package com.graphhopper.storage;
 import com.graphhopper.routing.ev.*;
 import com.graphhopper.routing.util.AllEdgesIterator;
 import com.graphhopper.routing.util.EdgeFilter;
-import com.graphhopper.routing.util.EncodingManager;
 import com.graphhopper.routing.weighting.Weighting;
 import com.graphhopper.search.StringIndex;
 import com.graphhopper.util.*;
@@ -58,13 +57,11 @@ class BaseGraph implements Graph {
     // can be null if turn costs are not supported
     final TurnCostStorage turnCostStorage;
     final BitUtil bitUtil;
-    final EncodingManager encodingManager;
     private final int intsForFlags;
     // length | nodeA | nextNode | ... | nodeB
     // as we use integer index in 'egdes' area => 'geometry' area is limited to 4GB (we use pos&neg values!)
     private final DataAccess wayGeometry;
     private final Directory dir;
-    private final InternalGraphEventListener listener;
     /**
      * interval [0,n)
      */
@@ -90,17 +87,14 @@ class BaseGraph implements Graph {
     private long maxGeoRef;
     private boolean frozen = false;
 
-    public BaseGraph(Directory dir, final EncodingManager encodingManager, boolean withElevation,
-                     InternalGraphEventListener listener, boolean withTurnCosts, int segmentSize) {
+    public BaseGraph(Directory dir, int intsForFlags, boolean withElevation, boolean withTurnCosts, int segmentSize) {
         this.dir = dir;
-        this.encodingManager = encodingManager;
-        this.intsForFlags = encodingManager.getIntsForFlags();
+        this.intsForFlags = intsForFlags;
         this.bitUtil = BitUtil.get(dir.getByteOrder());
         this.wayGeometry = dir.find("geometry");
         this.stringIndex = new StringIndex(dir);
         this.nodes = dir.find("nodes", DAType.getPreferredInt(dir.getDefaultType()));
         this.edges = dir.find("edges", DAType.getPreferredInt(dir.getDefaultType()));
-        this.listener = listener;
         this.bounds = BBox.createInverse(withElevation);
         this.nodeAccess = new GHNodeAccess(this, withElevation);
         if (withTurnCosts) {
@@ -113,16 +107,12 @@ class BaseGraph implements Graph {
         }
     }
 
-    boolean isInBounds(int edgeId) {
-        return edgeId < edgeCount && edgeId >= 0;
+    private void setEdgeRef(int nodeId, int edgeId) {
+        nodes.setInt(toNodePointer(nodeId) + N_EDGE_REF, edgeId);
     }
 
-    private void setEdgeRef(long nodeId, int edgeId) {
-        nodes.setInt(nodeId * nodeEntryBytes + N_EDGE_REF, edgeId);
-    }
-
-    int getEdgeRef(long nodeId) {
-        return nodes.getInt(nodeId * nodeEntryBytes + N_EDGE_REF);
+    int getEdgeRef(int nodeId) {
+        return nodes.getInt(toNodePointer(nodeId) + N_EDGE_REF);
     }
 
     private int getNodeA(long edgePointer) {
@@ -141,9 +131,16 @@ class BaseGraph implements Graph {
         return edges.getInt(edgePointer + E_LINKB);
     }
 
-    private long toPointer(int edgeId) {
-        assert isInBounds(edgeId) : "edgeId " + edgeId + " not in bounds [0," + edgeCount + ")";
-        return (long) edgeId * edgeEntryBytes;
+    long toNodePointer(int node) {
+        if (node < 0 || node >= nodeCount)
+            throw new IllegalArgumentException("node: " + node + " out of bounds [0," + nodeCount + "[");
+        return (long) node * nodeEntryBytes;
+    }
+
+    private long toEdgePointer(int edge) {
+        if (edge < 0 || edge >= edgeCount)
+            throw new IllegalArgumentException("edge: " + edge + " out of bounds [0," + edgeCount + "[");
+        return (long) edge * edgeEntryBytes;
     }
 
     private int getOtherNode(int nodeThis, long edgePointer) {
@@ -177,51 +174,45 @@ class BaseGraph implements Graph {
             throw new IllegalStateException("The graph has not yet been initialized.");
     }
 
-    protected int loadNodesHeader() {
-        nodeEntryBytes = nodes.getHeader(1 * 4);
-        nodeCount = nodes.getHeader(2 * 4);
-        bounds.minLon = Helper.intToDegree(nodes.getHeader(3 * 4));
-        bounds.maxLon = Helper.intToDegree(nodes.getHeader(4 * 4));
-        bounds.minLat = Helper.intToDegree(nodes.getHeader(5 * 4));
-        bounds.maxLat = Helper.intToDegree(nodes.getHeader(6 * 4));
+    private void loadNodesHeader() {
+        nodeEntryBytes = nodes.getHeader(0 * 4);
+        nodeCount = nodes.getHeader(1 * 4);
+        bounds.minLon = Helper.intToDegree(nodes.getHeader(2 * 4));
+        bounds.maxLon = Helper.intToDegree(nodes.getHeader(3 * 4));
+        bounds.minLat = Helper.intToDegree(nodes.getHeader(4 * 4));
+        bounds.maxLat = Helper.intToDegree(nodes.getHeader(5 * 4));
 
         if (bounds.hasElevation()) {
-            bounds.minEle = Helper.intToEle(nodes.getHeader(7 * 4));
-            bounds.maxEle = Helper.intToEle(nodes.getHeader(8 * 4));
+            bounds.minEle = Helper.intToEle(nodes.getHeader(6 * 4));
+            bounds.maxEle = Helper.intToEle(nodes.getHeader(7 * 4));
         }
 
-        frozen = nodes.getHeader(9 * 4) == 1;
-        return 10;
+        frozen = nodes.getHeader(8 * 4) == 1;
     }
 
-    protected int setNodesHeader() {
-        nodes.setHeader(1 * 4, nodeEntryBytes);
-        nodes.setHeader(2 * 4, nodeCount);
-        nodes.setHeader(3 * 4, Helper.degreeToInt(bounds.minLon));
-        nodes.setHeader(4 * 4, Helper.degreeToInt(bounds.maxLon));
-        nodes.setHeader(5 * 4, Helper.degreeToInt(bounds.minLat));
-        nodes.setHeader(6 * 4, Helper.degreeToInt(bounds.maxLat));
+    private void setNodesHeader() {
+        nodes.setHeader(0 * 4, nodeEntryBytes);
+        nodes.setHeader(1 * 4, nodeCount);
+        nodes.setHeader(2 * 4, Helper.degreeToInt(bounds.minLon));
+        nodes.setHeader(3 * 4, Helper.degreeToInt(bounds.maxLon));
+        nodes.setHeader(4 * 4, Helper.degreeToInt(bounds.minLat));
+        nodes.setHeader(5 * 4, Helper.degreeToInt(bounds.maxLat));
         if (bounds.hasElevation()) {
-            nodes.setHeader(7 * 4, Helper.eleToInt(bounds.minEle));
-            nodes.setHeader(8 * 4, Helper.eleToInt(bounds.maxEle));
+            nodes.setHeader(6 * 4, Helper.eleToInt(bounds.minEle));
+            nodes.setHeader(7 * 4, Helper.eleToInt(bounds.maxEle));
         }
 
-        nodes.setHeader(9 * 4, isFrozen() ? 1 : 0);
-        return 10;
+        nodes.setHeader(8 * 4, isFrozen() ? 1 : 0);
     }
 
-    protected int loadEdgesHeader() {
+    protected void loadEdgesHeader() {
         edgeEntryBytes = edges.getHeader(0 * 4);
         edgeCount = edges.getHeader(1 * 4);
-        return 5;
     }
 
-    protected int setEdgesHeader() {
+    protected void setEdgesHeader() {
         edges.setHeader(0, edgeEntryBytes);
         edges.setHeader(1 * 4, edgeCount);
-        edges.setHeader(2 * 4, encodingManager.hashCode());
-        edges.setHeader(3 * 4, supportsTurnCosts() ? turnCostStorage.hashCode() : -1);
-        return 5;
     }
 
     protected int loadWayGeometryHeader() {
@@ -262,7 +253,6 @@ class BaseGraph implements Graph {
             N_TC = -1;
 
         initNodeAndEdgeEntrySize();
-        listener.initStorage();
         initialized = true;
     }
 
@@ -356,16 +346,10 @@ class BaseGraph implements Graph {
             throw new IllegalStateException("base graph already frozen");
 
         frozen = true;
-        listener.freeze();
     }
 
     synchronized boolean isFrozen() {
         return frozen;
-    }
-
-    public void checkFreeze() {
-        if (isFrozen())
-            throw new IllegalStateException("Cannot add edge or node after baseGraph.freeze was called");
     }
 
     void create(long initSize) {
@@ -410,7 +394,7 @@ class BaseGraph implements Graph {
         System.out.format(Locale.ROOT, formatEdges, "#", "E_NODEA", "E_NODEB", "E_LINKA", "E_LINKB", "E_FLAGS", "E_DIST");
         IntsRef intsRef = new IntsRef(intsForFlags);
         for (int i = 0; i < Math.min(edgeCount, printMax); ++i) {
-            long edgePointer = toPointer(i);
+            long edgePointer = toEdgePointer(i);
             readFlags(edgePointer, intsRef);
             System.out.format(Locale.ROOT, formatEdges, i,
                     getNodeA(edgePointer),
@@ -512,7 +496,7 @@ class BaseGraph implements Graph {
      * @return the updated iterator the properties where copied to.
      */
     EdgeIteratorState copyProperties(EdgeIteratorState from, EdgeIteratorStateImpl to) {
-        long edgePointer = toPointer(to.getEdge());
+        long edgePointer = toEdgePointer(to.getEdge());
         writeFlags(edgePointer, from.getFlags());
 
         // copy the rest with higher level API
@@ -546,7 +530,7 @@ class BaseGraph implements Graph {
      */
     final int internalEdgeAdd(int newEdgeId, int nodeA, int nodeB) {
         writeEdge(newEdgeId, nodeA, nodeB);
-        long edgePointer = toPointer(newEdgeId);
+        long edgePointer = toEdgePointer(newEdgeId);
 
         int edge = getEdgeRef(nodeA);
         if (edge > EdgeIterator.NO_EDGE)
@@ -569,7 +553,7 @@ class BaseGraph implements Graph {
         if (!EdgeIterator.Edge.isValid(edgeId))
             throw new IllegalStateException("Cannot write edge with illegal ID:" + edgeId + "; nodeA:" + nodeA + ", nodeB:" + nodeB);
 
-        long edgePointer = toPointer(edgeId);
+        long edgePointer = toEdgePointer(edgeId);
         edges.setInt(edgePointer + E_NODEA, nodeA);
         edges.setInt(edgePointer + E_NODEB, nodeB);
         edges.setInt(edgePointer + E_LINKA, EdgeIterator.NO_EDGE);
@@ -599,9 +583,6 @@ class BaseGraph implements Graph {
 
     @Override
     public EdgeIteratorState getEdgeIteratorState(int edgeId, int adjNode) {
-        if (!isInBounds(edgeId))
-            throw new IllegalStateException("edgeId " + edgeId + " out of bounds, edgeCount: " + edgeCount);
-        checkAdjNodeBounds(adjNode);
         EdgeIteratorStateImpl edge = new EdgeIteratorStateImpl(this);
         if (edge.init(edgeId, adjNode))
             return edge;
@@ -637,54 +618,6 @@ class BaseGraph implements Graph {
     }
 
     @Override
-    public Graph copyTo(Graph g) {
-        initialized = true;
-        if (g.getClass().equals(getClass())) {
-            _copyTo((BaseGraph) g);
-            return g;
-        } else {
-            return GHUtility.copyTo(this, g);
-        }
-    }
-
-    void _copyTo(BaseGraph clonedG) {
-        if (clonedG.edgeEntryBytes != edgeEntryBytes)
-            throw new IllegalStateException("edgeEntryBytes cannot be different for cloned graph. "
-                    + "Cloned: " + clonedG.edgeEntryBytes + " vs " + edgeEntryBytes);
-
-        if (clonedG.nodeEntryBytes != nodeEntryBytes)
-            throw new IllegalStateException("nodeEntryBytes cannot be different for cloned graph. "
-                    + "Cloned: " + clonedG.nodeEntryBytes + " vs " + nodeEntryBytes);
-
-        if (clonedG.nodeAccess.getDimension() != nodeAccess.getDimension())
-            throw new IllegalStateException("dimension cannot be different for cloned graph. "
-                    + "Cloned: " + clonedG.nodeAccess.getDimension() + " vs " + nodeAccess.getDimension());
-
-        // nodes
-        setNodesHeader();
-        nodes.copyTo(clonedG.nodes);
-        clonedG.loadNodesHeader();
-
-        // edges
-        setEdgesHeader();
-        edges.copyTo(clonedG.edges);
-        clonedG.loadEdgesHeader();
-
-        // name
-        stringIndex.copyTo(clonedG.stringIndex);
-
-        // geometry
-        setWayGeometryHeader();
-        wayGeometry.copyTo(clonedG.wayGeometry);
-        clonedG.loadWayGeometryHeader();
-
-        // turn cost storage
-        if (supportsTurnCosts()) {
-            turnCostStorage.copyTo(clonedG.turnCostStorage);
-        }
-    }
-
-    @Override
     public TurnCostStorage getTurnCostStorage() {
         return turnCostStorage;
     }
@@ -696,13 +629,13 @@ class BaseGraph implements Graph {
 
     @Override
     public int getOtherNode(int edge, int node) {
-        long edgePointer = toPointer(edge);
+        long edgePointer = toEdgePointer(edge);
         return getOtherNode(node, edgePointer);
     }
 
     @Override
     public boolean isAdjacentToNode(int edge, int node) {
-        long edgePointer = toPointer(edge);
+        long edgePointer = toEdgePointer(edge);
         return isAdjacentToNode(node, edgePointer);
     }
 
@@ -919,18 +852,16 @@ class BaseGraph implements Graph {
 
         @Override
         public final boolean next() {
-            while (true) {
-                if (!EdgeIterator.Edge.isValid(nextEdgeId))
-                    return false;
+            while (EdgeIterator.Edge.isValid(nextEdgeId)) {
                 goToNext();
-                if (filter.accept(this)) {
+                if (filter.accept(this))
                     return true;
-                }
             }
+            return false;
         }
 
         void goToNext() {
-            edgePointer = baseGraph.toPointer(nextEdgeId);
+            edgePointer = baseGraph.toEdgePointer(nextEdgeId);
             edgeId = nextEdgeId;
             int nodeA = baseGraph.getNodeA(edgePointer);
             boolean baseNodeIsNodeA = baseNode == nodeA;
@@ -970,7 +901,7 @@ class BaseGraph implements Graph {
             edgeId++;
             if (edgeId >= baseGraph.edgeCount)
                 return false;
-            edgePointer = baseGraph.toPointer(edgeId);
+            edgePointer = baseGraph.toEdgePointer(edgeId);
             baseNode = baseGraph.getNodeA(edgePointer);
             adjNode = baseGraph.getNodeB(edgePointer);
             freshFlags = false;
@@ -1019,10 +950,10 @@ class BaseGraph implements Graph {
          * @return false if the edge has not a node equal to expectedAdjNode
          */
         final boolean init(int edgeId, int expectedAdjNode) {
-            if (!EdgeIterator.Edge.isValid(edgeId))
-                throw new IllegalArgumentException("fetching the edge requires a valid edgeId but was " + edgeId);
+            if (edgeId < 0 || edgeId >= baseGraph.edgeCount)
+                throw new IllegalArgumentException("edge: " + edgeId + " out of bounds: [0," + baseGraph.edgeCount + "[");
             this.edgeId = edgeId;
-            edgePointer = baseGraph.toPointer(edgeId);
+            edgePointer = baseGraph.toEdgePointer(edgeId);
             baseNode = baseGraph.getNodeA(edgePointer);
             adjNode = baseGraph.getNodeB(edgePointer);
             freshFlags = false;
@@ -1047,7 +978,7 @@ class BaseGraph implements Graph {
             if (edgeKey < 0)
                 throw new IllegalArgumentException("edge keys must not be negative, given: " + edgeKey);
             this.edgeId = GHUtility.getEdgeFromEdgeKey(edgeKey);
-            edgePointer = baseGraph.toPointer(edgeId);
+            edgePointer = baseGraph.toEdgePointer(edgeId);
             baseNode = baseGraph.getNodeA(edgePointer);
             adjNode = baseGraph.getNodeB(edgePointer);
             freshFlags = false;
